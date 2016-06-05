@@ -1,0 +1,287 @@
+<center> <h3>Practical Machine Learning Course Project - Human Activity Recognition</h3> </center>
+<center> Jean-Michel Coeur, 5 June 2016 </center>
+
+
+### 1. Executive Summary
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. In this project, we use the data from accelerometers on the belt, forearm, arm, and dumbell of 6 young health participants to the study. These participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions:
+
+- exactly according to the specification (Class A), 
+- throwing the elbows to the front (Class B), 
+- lifting the dumbbell only halfway (Class C), 
+- lowering the dumbbell only halfway (Class D) 
+- and throwing the hips to the front (Class E).
+
+The goal of this analysis is to predict the manner in which the participants did the exercise. This is the "classe" variable in the training set. To this extend, we have built two models based on the Random Forests algorithm. The first one takes all predictors with no missing values into account. The second one use a PCA approach to reduce the number of dimensions.
+
+- The accuracy of the best model (non PCA) is 99.8%, 
+- The out of sample error (in this case we used the Out Of The Bag Error provided by the train function from the Caret package) is below 1%.
+
+This document comprises the following sections:
+
+ - Getting the data
+ - Exploratory Data Analysis
+ - Construction of a predictive model using Random Forests
+ - Submission
+
+**Note:** 
+The original study can be found under the following reference:
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. More information is available from the [website](http://groupware.les.inf.puc-rio.br/har#ixzz49utjmu2R).
+
+
+### 2. Getting the data
+
+##### 2.1 Libraries in use for the analysis
+
+```{r eval = TRUE, results = 'hide', message = FALSE, warning = FALSE, echo = TRUE}
+
+# Required R packages to perform the analysis
+require(caret)         # Machine learning package
+require(randomForest)  # Random Forest
+require(ggplot2)       # Plotting system in use for the analysis
+require(parallel)      # We use parallel processing to take advantage of an 8 cores machine
+require(doParallel)
+```
+
+##### 2.2 Training and Test sets
+
+```{r TrainingTestData, eval = TRUE, echo = TRUE}
+# Get training data:
+url_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+if (!file.exists("./Data/pml-training.csv")) 
+  download.file(url_train, "./Data/pml-training.csv", method="curl")
+
+# Get test data:
+url_submit <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if (!file.exists("./Data/pml-testing.csv")) 
+  download.file(url_submit, "./Data/pml-testing.csv", method="curl")
+
+# By looking at the raw data, we spot NA, empty values and some "#DIV/0!"
+# We replace all cells that don't have values by NA
+pml_training <- read.csv("./Data/pml-training.csv", na.strings = c(""," ","NA", "#DIV/0!"))
+pml_submission <- read.csv("./Data/pml-testing.csv", na.strings = c(""," ","NA", "#DIV/0!"))
+```
+
+### 3. Exploratory Data Analysis
+
+We look at the dimensions of the dataset, and then focus on potential missing values.
+
+##### 3.1 Overview
+```{r Explore, eval = TRUE, echo = TRUE}
+# Size of the datasets
+dim(pml_training)
+dim(pml_submission)
+
+# Verification that the two datasets have the same variable names
+# We remove the "Classe" variable from pml_training and the "problem_id" variable from pml_submission
+# 0 indicates no difference in variable names and order
+sum(!(names(pml_training)[-160] == names(pml_submission)[-160]))
+
+# We don't execute the 'str()' command below to shorten the document output
+# str(pml_training)
+
+# We truncate the output to keep the analysis concise
+head(names(pml_training), 20)
+levels(pml_training$classe) # 5 levels = A, B, C, D, E
+levels(pml_training$user_name) # 6 participants
+```
+
+##### 3.2 Missing values
+
+```{r MissingValues, eval = TRUE, echo = TRUE}
+# Checking for missing data
+nrow(pml_training[complete.cases(pml_training), ])
+# Each record has at least one missing value in one variable
+
+# Data columns with too many missing values are unlikely to carry much useful information. 
+count_na <-sapply(pml_training, function(y) sum(is.na(y)))
+t_na <- table(count_na)
+t_na
+```
+
+Only 60 columns have no missing values. 
+
+- 67 columns have exactly 19216 NA, which represent 98% of the records 
+- Additional 33 columns have more than 19216 NA, representing more than 98% of the records.
+
+Therefore, we can proceed with the removal of the 67 + 33 = 100 columns that have 98% or more of NA
+
+```{r Cleaning, evala = TRUE, echo = TRUE}
+# We retrieve the 60 columns with no missing values
+columns_to_keep <- names(which(count_na == 0))
+```
+
+##### 3.2 Dimension reduction, variables transformation, data distribution
+
+```{r DimensionReduction, eval = TRUE, echo = TRUE}
+# We remove the first column "X"", which denotes the identifier of the record
+# We look at anything related to date & timestamp
+pml_training$cvtd_timestamp <- as.Date(pml_training$cvtd_timestamp, format = "%d/%m/%y")
+table(pml_training$cvtd_timestamp) # 4 days in total to capture all data
+# We remove the timestamp and the dates as the date of a specific measurement shouldn't impact the results
+columns_to_keep <- columns_to_keep[-c(1:5)]
+
+proc_training <- pml_training[, columns_to_keep]
+# As we remove potential predictors in the training set, we remove the same predictors in the testing set, 
+# together with the last variable "problem_id"
+proc_submission <- pml_submission[, columns_to_keep[1:length(columns_to_keep) - 1]]
+
+# Check for remaining missing values
+nrow(proc_training[complete.cases(proc_training) == FALSE, ])
+nrow(proc_submission[complete.cases(proc_submission) == FALSE, ])
+# None of these two datasets have any missing value
+
+# Data distribution
+# We look at the spread of each classe of exercise to check any inbalance between classes
+# Random Forests tend to skew good predictions towards the larger class set 
+table(proc_training$classe)
+
+# Size of the datasets
+dim(proc_training)
+dim(proc_submission)
+
+# Further potential dimension reduction with Principal Component Analysis (PCA)
+preProcPCA <- preProcess(proc_training[, -c(1, 55)], method = "pca", thresh = 0.90)
+preProcPCA$numComp # 19
+```
+
+19 variables explain 90% of the variance, out of the 54 potential predictors. We build two models:
+
+   - One with no further dimension reduction: 54 variables
+   - One with dimension reduction using PCA: 19 variables.
+  
+### 4. Construction of a predictive model using Random Forests
+
+From the previous lectures, we choose to start with a Random Forest model as it provides an efficient way to select classifiers. It also leads to a good or better accuracy among other models, and provides an unbiased estimate of the test set error.
+
+We choose to train the model on the entire training dataset since we use trainControl() to set the cross validation method to "cv", and include the trainControl object in the call to caret::train(). The train() command automatically runs cross-validation, which removes the need to split further the training set between training set, test set and validation set.
+
+Because Random Forests is a resource intensive algorithm, we are following the [Optimization with Caret & parallel processing](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md) instructions.
+
+##### 4.1 Random forest with 54 independent variables
+
+```{r PlainRandomForest, eval = TRUE, echo = TRUE, cache = TRUE}
+# We use parallel processing to take advantage of an 8 cores machine
+cluster <- makeCluster(detectCores() - 1) # We leave 1 core for the Operating System
+registerDoParallel(cluster)
+
+# We specify a 10 folds Cross Validation as resampling method, and use the parallel processing power
+# We leave the default number of trees to 500
+fitControl <- trainControl(method = "cv",
+                           number = 10, # 10 seems to be a suitable number given the relatively large dataset
+                           allowParallel = TRUE)
+# The algorithm takes about 13 mn to complete
+set.seed(1889)
+fit_rf <- train(classe ~ ., method = "rf", data = proc_training, trControl = fitControl)
+
+stopCluster(cluster)
+
+# Average Out of Bag error (Percentage)
+cat('Out of Bag error:', round(mean(fit_rf$finalModel$err.rate) * 100, 2), '%')
+# Confusion matrix
+fit_rf$finalModel$confusion
+# Accuracy
+cat('Random Forests Model accuracy:', round(max(fit_rf$results$Accuracy) * 100, 3), '%')
+
+```
+
+##### 4.1 Random forest with 19 independent variables, using dimension reduction with PCA 
+
+```{r PCARandomForests, eval = TRUE, echo = TRUE, cache = TRUE}
+# We take only 90% of the variance
+preProcPCA <- preProcess(proc_training[, -c(1, 55)], method = "pca", thresh = 0.90)
+preProcPCA$numComp # 19
+
+# Take previous PCA model
+trainPCA <- predict(preProcPCA, proc_training[, -1])
+
+# We use parallel processing to take advantage of an 8 cores machine
+cluster <- makeCluster(detectCores() - 1) # We leave 1 core for the Operating System
+registerDoParallel(cluster)
+
+# We leave the default number of trees to 500
+fitControlPCA <- trainControl(method = "cv",
+                              number = 10, # 10 seems to be a suitable number given the relatively large dataset
+                              allowParallel = TRUE)
+
+# The algorithm takes about 8 mn to complete
+set.seed(1889)
+fit_rf_PCA <- train(classe ~ ., method = "rf", data = trainPCA, trControl = fitControlPCA)
+
+stopCluster(cluster)
+
+# Average Out of Bag error (Percentage)
+cat("Out of Bag error:", round(mean(fit_rf_PCA$finalModel$err.rate) * 100, 2), "%")
+# Confusion matrix
+fit_rf_PCA$finalModel$confusion
+# Accuracy
+cat('Random Forests PCA Model accuracy:', round(max(fit_rf_PCA$results$Accuracy) * 100, 3), '%')
+
+```
+
+This second model with PCA is less accurate than the previous Random Froests Model. This is expected since we only explain 90% of the variance.
+
+### 5. Submission - Prediction on the 20 elements of the testing set
+
+We predict the classes of the 20 elements of the testing set using the two models that have been built previously, and combine the predictions into a single data frame.
+
+```{r}
+# We check the proc_submission dataset before predicting the 20 elements
+final_test <- proc_submission
+# Verification that all variables in the testing set have the same type than the ones in the training set
+which (!(sapply(proc_training[, -55], class) == sapply(proc_submission, class)))
+
+# We apply the same variables types from the training set to the submission set 
+final_test[] <- mapply(FUN = as, final_test, sapply(proc_training[,-55], class), SIMPLIFY = FALSE)
+
+# Function that returns the name of variable/data frame column of selected value
+whichMax <- function (elt) return (names(pred_rf)[which(elt == max(elt))])
+
+# Prediction on the testing set for submission - Using Random Forests model with all predictors
+pred_rf <- predict(fit_rf, newdata = final_test, type = "prob")
+
+# We take the highest probability for each element to identify the classe it belongs to
+classe_rf <- apply(pred_rf, MARGIN = 1, FUN = whichMax)
+
+# Prediction on the testing set for submission - Using Random Forests model with PCA
+# Original variables coefficients to obtain PCA:
+# labels(preProcPCA$rotation)[[1]]
+
+# Remove the first non significant predictor 'new_window'
+# fit_rf$finalModel$importance
+columns_pca_to_keep <- names(proc_submission[, -1]) 
+proc_submission_pca <- proc_submission[, columns_pca_to_keep]
+proc_submission_pca <- as.matrix(proc_submission_pca)
+
+# Transform the test set with 54 predictors into 'PCA like' matrix of 20 records 
+# with 19 predictors using the PCA Rotation matrix
+proc_subpca <- proc_submission_pca %*% preProcPCA$rotation
+
+# Prediction on the testing set for submission - Using Random Forests model with the 'PCA' predictors
+pred_rf_PCA <- predict(fit_rf_PCA, newdata = proc_subpca, type = "prob")
+# We take the highest probability for each element to identify the classe it belongs to
+classe_rf_PCA <- apply(pred_rf_PCA, MARGIN = 1, FUN = whichMax)
+
+# Final prediction, using the two models
+print.data.frame(as.data.frame(rbind(classe_rf, classe_rf_PCA), 
+                               labels = c("ClasseALLPred", "ClassePCA"), quote = FALSE))
+
+```
+
+The first line 'ClasseALLPred' lists the correct prediction on the test set of 20 records.
+The second line 'ClassePCA' lists the prediction using the PCA model, which are not the correct predictions.
+
+### 6. Conclusion
+
+I was able to submit the right 20 responses on the given test set by using the first (plain) Random Forests model. I was expected at least 19 answers correct out of 20 given this first model has:
+
+   - 99.8% accuracy
+   - 0.2% Out of the Bag error.
+   
+The second model with PCA didn't provide the expected level of accuracy to pass the test. While PCA is appealing to reduce dimensions in datasets, it needs to be carefully assessed before use.
+
+                            ----------------- End of the analysis ----------------- 
+
+
+
